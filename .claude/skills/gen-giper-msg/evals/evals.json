@@ -1,0 +1,54 @@
+{
+  "skill_name": "gen-giper-msg",
+  "notes": "Each test makes 1-3 real claude --print calls. Cost is covered by the user's Max subscription (no API key). A full eval pass at the listed sample size is ~$0.20-0.50 of metered subscription usage.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "validate-on-2gis-lead-gen-sheet",
+      "prompt": "Прогони validate на таблицу https://docs.google.com/spreadsheets/d/194zVZg90O9B586E9XvdSlvKj2ojAyPn8pReJu53RgBQ/edit и скажи сколько лидов готовы к генерации.",
+      "expected_output": "Agent runs run.py validate, reports total_leads, leads_with_message_already, leads_to_process. Does NOT generate any messages.",
+      "assertions": [
+        {"name": "calls_validate_subcommand", "type": "trace_contains", "value": "run.py validate"},
+        {"name": "does_not_call_generate", "type": "trace_not_contains", "value": "run.py generate"},
+        {"name": "reports_counts_in_russian", "type": "response_contains_any", "values": ["лидов", "сообщений", "готов"]}
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "generate-3-messages-with-confirmation",
+      "prompt": "Сгенерируй сообщения для 3 лидов в таблице 194zVZg90O9B586E9XvdSlvKj2ojAyPn8pReJu53RgBQ",
+      "expected_output": "Agent should call validate first, ask user to confirm, then call generate --count 3 after confirmation. Output should report 3 generated messages, with breakdown_by_channel, and show first 2-3 sample messages to user for sanity check.",
+      "assertions": [
+        {"name": "validate_called_first", "type": "trace_contains", "value": "validate"},
+        {"name": "agent_asks_for_confirmation", "type": "response_contains_any", "values": ["готов", "Да/Нет", "запустить"]},
+        {"name": "generate_called_with_count_3", "type": "trace_contains", "value": "--count 3"},
+        {"name": "summary_says_3_generated", "type": "stdout_json_path", "path": "messages_generated", "value": 3},
+        {"name": "agent_shows_sample_message", "type": "response_contains_any", "values": ["Здравствуйте", "👋", "💪", "💅"]}
+      ],
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "missing-sheet-prompt-ask",
+      "prompt": "Сгенерируй персонализированные сообщения для всех лидов",
+      "expected_output": "Agent must NOT start the pipeline. Must ask for a Google Sheets link before doing anything.",
+      "assertions": [
+        {"name": "agent_asks_for_sheet", "type": "response_contains_any", "values": ["ссылк", "таблиц", "Google Sheets"]},
+        {"name": "no_subprocess_calls", "type": "trace_not_contains", "value": "run.py"}
+      ],
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "tier-filter-phone-only",
+      "prompt": "Сгенерируй сообщения только для лидов с телефонами (WhatsApp) в таблице 194zVZg90O9B586E9XvdSlvKj2ojAyPn8pReJu53RgBQ",
+      "expected_output": "Agent should pass --tier phone to the generate command. Resulting breakdown_by_channel should have 0 Instagram DM entries.",
+      "assertions": [
+        {"name": "tier_phone_flag_used", "type": "trace_contains", "value": "--tier phone"},
+        {"name": "zero_ig_dm_in_breakdown", "type": "stdout_json_path", "path": "breakdown_by_channel.Instagram DM", "value": 0}
+      ],
+      "files": []
+    }
+  ]
+}

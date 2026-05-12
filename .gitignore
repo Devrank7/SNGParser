@@ -1,0 +1,47 @@
+# ─── Secrets (NEVER commit) ──────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+service_account.json
+service_account*.json
+*.pem
+*.key
+credentials.json
+
+# ─── Business data (PII of scraped leads) ────────────────────────────────────
+.claude/skills/*/db/*.db
+.claude/skills/*/db/*.db-journal
+.claude/skills/*/db/*.db-wal
+.claude/skills/*/db/*.db-shm
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.bak
+
+# ─── Local development ───────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ─── Claude Code local settings ──────────────────────────────────────────────
+.claude/settings.local.json
+
+# ─── Temp / outputs ──────────────────────────────────────────────────────────
+/tmp/
+*.tmp
+*.log
+output/
+
+# ─── Skill workspaces (test run artifacts, not source) ───────────────────────
+*-workspace/

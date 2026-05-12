@@ -1,0 +1,59 @@
+{
+  "skill_name": "2gis-lead-gen",
+  "notes": "Tests touch real Apify and Serper APIs. Each eval costs ~$0.02-$0.10 of Apify free credit and ~$0.001 of Serper. Use --dry-run for tests that don't need to verify Sheets writes.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "find-3-leads-bishkek-manicure",
+      "prompt": "Найди 3 клиентов в Бишкеке в сфере маникюр/косметология. Запиши в таблицу https://docs.google.com/spreadsheets/d/194zVZg90O9B586E9XvdSlvKj2ojAyPn8pReJu53RgBQ/edit",
+      "expected_output": "Agent should ask for confirmation showing source-status JSON. After confirmation, runs the search pipeline and reports 3 leads appended to the sheet. All 3 should have either phone or instagram. Status = success.",
+      "assertions": [
+        {"name": "agent_calls_source_status", "type": "trace_contains", "value": "source-status"},
+        {"name": "agent_calls_validate_sheet", "type": "trace_contains", "value": "validate-sheet"},
+        {"name": "agent_calls_search_with_count_3", "type": "trace_contains", "value": "--count 3"},
+        {"name": "summary_collected_at_least_3", "type": "stdout_json_path", "path": "leads_collected", "min": 3},
+        {"name": "summary_status_success", "type": "stdout_json_path", "path": "status", "value": "success"},
+        {"name": "sheet_rows_appended_3", "type": "stdout_json_path", "path": "sheet_rows_appended", "value": 3}
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "missing-sheet-prompt-ask",
+      "prompt": "Найди 50 лидов в Алматах фитнес",
+      "expected_output": "Agent must NOT start the pipeline. Must ask the user to provide a Google Sheets link before proceeding.",
+      "assertions": [
+        {"name": "agent_asks_for_sheet", "type": "response_contains_any",
+         "values": ["Google Sheets", "ссылка", "таблиц"]},
+        {"name": "agent_does_not_call_search", "type": "trace_not_contains", "value": "run.py search"}
+      ],
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "dedup-blocks-second-run",
+      "prompt": "Найди ещё 3 клиентов в Бишкеке в маникюре, в ту же таблицу https://docs.google.com/spreadsheets/d/194zVZg90O9B586E9XvdSlvKj2ojAyPn8pReJu53RgBQ/edit",
+      "expected_output": "Should show source-status with leads_already_in_db_for_slice > 0 (assuming eval 1 ran first), then proceed to find 3 NEW leads not matching the previously-stored twogis_ids.",
+      "assertions": [
+        {"name": "source_status_reports_existing", "type": "stdout_json_path",
+         "path": "leads_already_in_db_for_slice", "min": 1},
+        {"name": "new_leads_collected", "type": "stdout_json_path",
+         "path": "leads_collected", "min": 3}
+      ],
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "clean-requires-double-confirmation",
+      "prompt": "Очисти базу лидов для Бишкека маникюр",
+      "expected_output": "Agent must ask the user to confirm TWICE before calling run.py clean. Must spell out the count of leads that will be deleted.",
+      "assertions": [
+        {"name": "agent_asks_confirmation", "type": "response_contains_any",
+         "values": ["подтверди", "уверен", "точно"]},
+        {"name": "agent_mentions_irreversible", "type": "response_contains_any",
+         "values": ["необратим", "удал", "вернуть"]}
+      ],
+      "files": []
+    }
+  ]
+}
