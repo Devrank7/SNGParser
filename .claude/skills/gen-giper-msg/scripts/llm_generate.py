@@ -24,6 +24,7 @@ EXAMPLES_PATH = SKILL_DIR / "templates" / "examples.md"
 
 # ─── Stop-word blacklist (case-insensitive substring check) ───────────────────
 STOP_PHRASES = [
+    # Corporate / sales-y buzzwords
     "уникальное предложение",
     "только сегодня",
     "ограниченное предложение",
@@ -42,11 +43,133 @@ STOP_PHRASES = [
     "хочу сотрудничать",
     "уважаемый клиент",
     "пишу вам, потому что",
+    # Bridge phrases AI overuses
+    "стоит отметить",
+    "хочется отметить",
+    "хочу обратить ваше внимание",
+    "позвольте представить",
+    # Marketing jargon (manager: "словарь маркетолога, не человека")
+    "конверси",          # конверсия / конверсий / повышение конверсии
+    "воронк",            # воронка / воронку
+    "точки контакта",
+    "целевая аудитория",
+    "юзабилити",
+    "оптимизаци",        # оптимизация / оптимизировать
+    "повышение охвата",
+    "инструмент роста",  # частая buzz-фраза в наших старых текстах
+    # Diagnose phrases (manager: "тон врача и обвинение")
+    "вы теряете",
+    "теряете клиентов",
+    "клиенты теряются",
+    "клиентки теряются",
+    "вы упускаете",
+    "вы страдаете",
+    "проблема в том",
+    "минус для бизнеса",
+    "у вас проблема",
+    # Padding / pressure words (manager: "давит даже когда не хочется")
+    "к сожалению",
+    "беда в том",
+    "неэффективно",
+    # Round-2 manager fixes
+    "пишу по",          # call-center opener
+    "профиль живой",
+    "профиль активный",
+    "аккаунт активный",
+    "контент качественный",
+    "без обязательств",  # sales mini-commitment phrase
+    "простой сайт",
+    "простые сайты",
+    "простые сайт",
 ]
 
-REQUIRED_JSON_KEYS = ["hook", "observation", "problem", "value", "ask"]
+REQUIRED_JSON_KEYS = ["hook", "observation", "problem", "value", "outcome", "ask"]
 
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+# Em-dash is the single biggest AI-tell in Russian-language LLM output.
+# We require simple punctuation (period, comma, colon, parens) instead.
+EM_DASH_CHARS = ("—", "–", " — ", " – ")
+
+# AI loves «не A, а B» / «не только X, но и Y» — humans rarely write that way
+# in cold messages. Trigger on a few common shapes.
+AI_PARALLEL_PATTERNS = [
+    re.compile(r"\bне\s+просто\s+\w+\s*,\s*а\b", re.IGNORECASE),
+    re.compile(r"\bне\s+только\s+\w+\s*,\s*но\s+и\b", re.IGNORECASE),
+    re.compile(r"\bне\s+\w+\s*,\s*а\s+\w+\b", re.IGNORECASE),
+]
+
+# Verb-chain pattern: 3+ verbs in present tense joined by commas.
+# Example: "находит, ищет, листает" / "заходит, смотрит, открывает, выбирает".
+# This is the agitate-problem template from copywriting courses — the manager
+# called it out specifically: "Так пишут в учебниках по копирайтингу. Живые
+# люди так не разговаривают."
+# We detect runs of 3+ words ending in present-tense verb endings separated
+# by ", ".
+VERB_CHAIN_RE = re.compile(
+    r"\b\w+(?:ет|ёт|ит|ат|ят|ает|яет|ует|ыт)\s*,\s*"
+    r"\w+(?:ет|ёт|ит|ат|ят|ает|яет|ует|ыт)\s*,\s*"
+    r"\w+(?:ет|ёт|ит|ат|ят|ает|яет|ует|ыт)\b",
+    re.IGNORECASE,
+)
+
+# "Клиентка/клиент + verb of action" — the fictional persona acting.
+# The manager: "ты пишешь клиентка, но её нет. Это абстракция. Получатель
+# чувствует подвох."
+FICTIONAL_PERSONA_RE = re.compile(
+    r"\b(клиентк[аиуо]|клиент[аыу]?|покупател[ьяи])\s+"
+    r"(ищ[её]т|листает|сравнивает|открывает|выбирает|уходит|переходит|"
+    r"находит|смотрит|заход[иеи]т|просматривает|пишет|спрашивает|переспрашивает)\b",
+    re.IGNORECASE,
+)
+
+# Round-2 manager fixes:
+
+# "5 минут" / "минут пять" — узнаваемая sales-техника маленького обязательства.
+FIVE_MIN_RE = re.compile(
+    r"\b(пять|5)\s*минут\b|\bминут\s*(пять|5)\b",
+    re.IGNORECASE,
+)
+
+# "Мы делаем [что-то]" в value — звучит как реклама компании.
+# Можно "у нас есть формат" / "делаем такие сайты" / "этот формат собираем".
+WE_DO_RE = re.compile(
+    r"\bмы\s+делаем\s+\w+",
+    re.IGNORECASE,
+)
+
+# Price patterns — manager strategy: убрать цену из первого сообщения.
+# Ловим: "$300", "от $300", "162 000 ₸", "от 162к", "162000 тенге".
+PRICE_RE = re.compile(
+    r"(\$\s*\d+"                                                # $300, $ 300
+    r"|от\s+\$\d+"                                              # от $300
+    r"|\bот\s+\d{2,3}\s?[кк]\b"                                 # от 162к
+    r"|\b\d{1,3}[\s ]?\d{3}\s*₸"                            # 162 000 ₸
+    r"|\b\d{1,3}[\s ]?\d{3}\s*тенге"                        # 162 000 тенге
+    r"|\b\d+\s*тысяч[а-я]*\s*тенге)",
+    re.IGNORECASE,
+)
+
+# Timeframe patterns — same reasoning as price, manager moved both to second message.
+TIMEFRAME_RE = re.compile(
+    r"\b(за\s+неделю|неделя\s+на\s+запуск|на\s+неделю|"
+    r"за\s+\d+\s*[-–]\s*\d+\s*дн|"
+    r"за\s+\d+\s*дн|"
+    r"\d+\s*[-–]\s*\d+\s*дней\b|"
+    r"за\s+\d+\s+нед\w*|"
+    r"\d+\s*[-–]\s*\d+\s+недел[ья]|"
+    r"запуск\s+за\b)",
+    re.IGNORECASE,
+)
+
+# Double-action observation: "нашёл X. зашёл Y." or "увидел X. посмотрел Y." —
+# manager: "звучит как отчёт о работе". One observation source per message.
+DOUBLE_ACTION_RE = re.compile(
+    r"\b(нашёл|нашла|обнаружил|увидел|наткнулся|познакомился)\s+\w+"
+    r"[^.!?]{0,80}[.!]\s*"
+    r"(зашёл|заглянул|открыл|посмотрел|изучил)\b",
+    re.IGNORECASE,
+)
 
 
 # ─── Prompt assembly ──────────────────────────────────────────────────────────
@@ -113,30 +236,107 @@ def validate_message(parts: dict, lead: dict) -> Optional[str]:
     full = " ".join(parts[k].strip() for k in REQUIRED_JSON_KEYS)
     word_count = len(full.split())
 
-    # 2. Length.
-    if word_count < 40:
-        return f"Слишком коротко ({word_count} слов). Цель — 70-90 слов."
-    if word_count > 130:
-        return f"Слишком длинно ({word_count} слов). Цель — 70-90 слов, сократи."
+    # 2. Length — 6-part structure with outcome field expands target.
+    # Hard bounds 55-110, sweet spot 70-90.
+    if word_count < 55:
+        return (f"Слишком коротко ({word_count} слов). Цель 70-90 слов. "
+                f"Не хватает конкретики в outcome — что увидит клиентка и что изменится для владельца.")
+    if word_count > 110:
+        return (f"Слишком длинно ({word_count} слов). Цель 70-90 слов. "
+                f"Режь на короткие фразы (одна мысль — одно предложение, до 18 слов).")
 
     # 3. Hook length.
     hook_words = len(parts["hook"].split())
-    if hook_words > 18:
-        return f"Hook слишком длинный ({hook_words} слов). Цель — 5-15 слов."
+    if hook_words > 12:
+        return f"Hook слишком длинный ({hook_words} слов). Цель 5-10 слов."
 
     # 4. Stop phrases.
     low = full.lower()
     for sp in STOP_PHRASES:
         if sp in low:
-            return f"Использована запрещённая фраза: '{sp}'. Перепиши без неё."
+            return (f"Использована запрещённая фраза: '{sp}'. "
+                    f"Это диагноз, давление, маркетинговый жаргон или корпоративный шаблон. "
+                    f"Перепиши простыми словами обычного человека.")
 
-    # 5. Business name should appear somewhere in the message (proves personalization).
+    # 4a. Em-dash — the single biggest AI-tell in Russian LLM output.
+    for ch in EM_DASH_CHARS:
+        if ch in full:
+            return ("Использован em-dash ('—' или '–'). НЕ ИСПОЛЬЗУЙ длинное тире вообще. "
+                    "Замени на точку, запятую, двоеточие или скобки. "
+                    "Короткое тире для диапазонов (например '7-10 дней') допустимо.")
+
+    # 4b. AI parallel structures ("не A, а B" / "не только X, но и Y").
+    for pat in AI_PARALLEL_PATTERNS:
+        m = pat.search(full)
+        if m:
+            return (f"Использована AI-симметрия: '{m.group(0)}'. "
+                    f"Не используй конструкции 'не A, а B' / 'не только X, но и Y'. "
+                    f"Перепиши простым прямым предложением.")
+
+    # 4c-d. Verb-chain + fictional-persona patterns were removed in V5 because they
+    # fire false-positives on legitimate AFTER-installation UX scenarios that the
+    # manager explicitly requested ("Клиентка заходит, видит, выбирает, записывается").
+    # Distinguishing BEFORE-fiction (bad) from AFTER-UX (good) is not reliably
+    # doable with regex. We now rely on the prompt + few-shot examples to keep
+    # the model on the right side. The constants are kept (above) for future use.
+
+    # 4e. "5 минут" / "минут пять" — sales mini-commitment technique.
+    m = FIVE_MIN_RE.search(full)
+    if m:
+        return (f"Использовано '{m.group(0)}' — узнаваемая sales-техника "
+                f"маленького обязательства. Уберите. Просто 'Скинуть пример?' "
+                f"или 'Могу показать как мог бы выглядеть'.")
+
+    # 4f. "Мы делаем [сайт]" в value — звучит как реклама компании.
+    m = WE_DO_RE.search(full)
+    if m:
+        return (f"Использовано '{m.group(0)}' — звучит как реклама компании. "
+                f"Замените на 'У нас есть формат: сайт с прайсом...' или "
+                f"'Делаем такие сайты для салонов: ...' или 'Этот формат собираем: ...'.")
+
+    # 4g. Price in first message — manager strategy: только во втором сообщении.
+    m = PRICE_RE.search(full)
+    if m:
+        return (f"Указана цена ('{m.group(0)}') в первом сообщении. "
+                f"Это превращает диалог в коммерческий до того как человек заинтересовался. "
+                f"Уберите цену. Её можно назвать во втором сообщении после положительного ответа.")
+
+    # 4h. Timeframe in first message — same reasoning as price.
+    m = TIMEFRAME_RE.search(full)
+    if m:
+        return (f"Указан срок запуска ('{m.group(0)}') в первом сообщении. "
+                f"Это коммерческое уточнение, такое же как цена. Уберите, обсудим срок во втором сообщении.")
+
+    # 4i. Double-action observation ("Нашёл вас на 2ГИС. Зашёл в Instagram").
+    m = DOUBLE_ACTION_RE.search(full)
+    if m:
+        return (f"Двойное действие в observation: '{m.group(0)[:80]}...'. "
+                f"Звучит как отчёт о работе. Упомяните что-то одно: либо 2ГИС, либо Instagram, не оба.")
+
+    # 5. Personalization proof: business name OR its first significant word
+    #    OR the company IG handle must appear somewhere in the message.
     biz = (lead.get("business_name") or "").strip()
-    if biz and biz.lower() not in low:
-        # Allow partial match — sometimes the business name is multi-word and only part fits naturally.
-        short = biz.split(",")[0].strip().lower()  # "Parizat nail studio, ногтевая студия" → "Parizat nail studio"
-        if short and short not in low:
-            return f"Не упомянуто название бизнеса ({biz!r}). Гиперперсонализация требует его в hook или observation."
+    if biz:
+        proofs = []
+        proofs.append(biz.lower())
+        short = biz.split(",")[0].strip().lower()
+        proofs.append(short)
+        # First "brand-y" word from the name — usually the brand part
+        # ("Parizat nail studio" → "parizat", "Stilist studio" → "stilist").
+        first_word = short.split()[0] if short.split() else ""
+        if first_word and len(first_word) >= 3:
+            proofs.append(first_word)
+        # Company IG handle counts as personalization proof.
+        company_ig = (lead.get("company_instagram") or "").lstrip("@").lower()
+        if company_ig:
+            proofs.append(company_ig)
+        owner_ig = (lead.get("owner_instagram") or "").lstrip("@").lower()
+        if owner_ig:
+            proofs.append(owner_ig)
+
+        if not any(p and p in low for p in proofs):
+            return (f"Не упомянуто название бизнеса ({biz!r}), его бренд-часть или IG-handle. "
+                    f"Гиперперсонализация требует хотя бы одного из них в hook или observation.")
 
     # 6. Owner name presence rules.
     owner = (lead.get("owner_name") or "").strip()
@@ -157,11 +357,20 @@ def validate_message(parts: dict, lead: dict) -> Optional[str]:
 
 
 def assemble_final(parts: dict) -> str:
-    """Stitch the 5 parts into the message a human will read."""
+    """Stitch the 6 parts into the message a human will read.
+
+    Paragraph structure:
+      1. hook
+      2. observation + problem (one paragraph, observation feeds the soft question)
+      3. value (what we offer — features, no price/timeframe)
+      4. outcome (what changes after install — UX + owner relief)
+      5. ask (soft request)
+    """
     return (
         f"{parts['hook'].strip()}\n\n"
         f"{parts['observation'].strip()} {parts['problem'].strip()}\n\n"
         f"{parts['value'].strip()}\n\n"
+        f"{parts['outcome'].strip()}\n\n"
         f"{parts['ask'].strip()}"
     )
 
