@@ -8,4 +8,4 @@ skills (demo-sender, ig-outreach) which are not part of this project.
 
 from .config import load_env, PROJECT_ROOT, ENV_FILE, SERVICE_ACCOUNT_FILE
 from .sheets import get_sheets_service, read_sheet, get_sheet_title
-from .telegram import send_telegram_report
+from .telegram import send_telegram_report, send_telegram_text

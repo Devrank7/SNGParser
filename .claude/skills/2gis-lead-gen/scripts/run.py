@@ -67,12 +67,18 @@ def _city_dedup_count(conn, city_slug: str, niche_slug: str) -> int:
 
 
 def _telegram_progress(message: str, enabled: bool = True):
-    """Best-effort Telegram progress note. Never crashes the pipeline."""
+    """Best-effort Telegram progress note. Never crashes the pipeline.
+
+    Uses the lightweight `send_telegram_text` helper (added 2026-05-12) so we
+    can pass a free-form string. `send_telegram_report` is a structured-dict
+    formatter intended for run-end summaries, not for progress pings.
+    """
     if not enabled:
         return
     try:
-        from _shared.telegram import send_telegram_report  # type: ignore
-        send_telegram_report(message)
+        from _shared.telegram import send_telegram_text  # type: ignore
+        env = load_env()
+        send_telegram_text(env, message)
     except Exception as e:
         _log(f"telegram send skipped: {e}")
 
@@ -91,14 +97,30 @@ def cmd_source_status(args):
     # (b) some will have no reachable contact at all.
     target = args.count
     estimated_records = target * 4
+    est_cost_places = 0.0
+    est_cost_ig_batch = 0.0
     if hasattr(src, "cost_per_1k_places"):
-        est_cost = round(estimated_records / 1000.0 * src.cost_per_1k_places, 2)
-    else:
-        est_cost = 0.0
+        est_cost_places = estimated_records / 1000.0 * src.cost_per_1k_places
+        # Real measurement (80-lead Almaty run, 2026-05-12): 86% of candidates
+        # had a company IG handle that triggered an `instagram-profile-scraper`
+        # fetch during the pre-fetch batch. Each lookup ~ $2.30 / 1K.
+        # Without this, the pre-flight check underestimates real spend ~50%.
+        ig_lookup_rate = 0.86
+        ig_cost_per_1k = 2.30
+        est_cost_ig_batch = estimated_records * ig_lookup_rate / 1000.0 * ig_cost_per_1k
+    est_cost = round(est_cost_places + est_cost_ig_batch, 2)
     balance = src.get_balance_usd() if hasattr(src, "get_balance_usd") else None
 
     conn = db_connect()
     already_in_db = _city_dedup_count(conn, city_slug, niche_slug)
+    # Cross-niche dedup: businesses already known under OTHER niches in this
+    # city will be silently skipped by the dedup step too — many salons in
+    # 2GIS appear under multiple rubrics ("маникюр" + "парикмахерская" + etc).
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM leads WHERE city = ? AND niche != ?",
+        (city_slug, niche_slug),
+    ).fetchone()
+    cross_niche_in_db = row["n"] if row else 0
 
     # Source the actor slug from data_sources.py rather than hardcoding it here,
     # so if we ever swap actors the source-status output stays in sync.
@@ -118,8 +140,19 @@ def cmd_source_status(args):
         "target_leads": target,
         "estimated_records_needed": estimated_records,
         "estimated_cost_usd": est_cost,
+        "estimated_cost_breakdown_usd": {
+            "twogis_places": round(est_cost_places, 2),
+            "instagram_batch": round(est_cost_ig_batch, 2),
+        },
         "apify_balance_remaining_usd": balance,
         "leads_already_in_db_for_slice": already_in_db,
+        "leads_already_in_db_other_niches_same_city": cross_niche_in_db,
+        "note": (
+            "cross-niche overlap is silently skipped by dedup. Some businesses "
+            "appear in 2GIS under multiple rubrics (e.g. салон красоты + "
+            "маникюр + брови). The actual reduction depends on how often "
+            "the upstream actor returns these duplicates for our query."
+        ) if cross_niche_in_db > 0 else None,
     })
 
 
@@ -224,11 +257,12 @@ def cmd_resume(args):
 
 
 def cmd_telegram_report(args):
-    from _shared.telegram import send_telegram_report  # type: ignore
+    from _shared.telegram import send_telegram_text  # type: ignore
     with open(args.result) as f:
         summary = json.load(f)
 
     breakdown = summary.get("breakdown", {})
+    size_bd = summary.get("size_breakdown", {})
     lines = [
         "📊 <b>2GIS Lead Gen</b>",
         f"Город: <b>{summary.get('city_ru', '—')}</b>",
@@ -238,12 +272,20 @@ def cmd_telegram_report(args):
         f"  • с телефоном: {breakdown.get('phone', 0)}",
         f"  • с IG владельца (auto, нужна проверка): {breakdown.get('owner_ig', 0)}",
         f"  • с IG компании: {breakdown.get('company_ig', 0)}",
+    ]
+    if size_bd:
+        lines.append(
+            f"Размер: sweet_spot={size_bd.get('sweet_spot', 0)}, "
+            f"micro={size_bd.get('micro', 0)}, large={size_bd.get('large', 0)}"
+        )
+    lines += [
         f"Apify spend: <b>${summary.get('apify_spend_usd', 0):.2f}</b>",
         f"Время: {summary.get('elapsed_seconds', 0)}s",
         f"Sheets: {summary.get('sheet_url', '')}",
     ]
+    env = load_env()
     try:
-        send_telegram_report("\n".join(lines))
+        send_telegram_text(env, "\n".join(lines))
         _emit({"ok": True})
     except Exception as e:
         _emit({"ok": False, "error": str(e)})
@@ -344,13 +386,22 @@ def cmd_search(args):
          f"fetching={over_fetch} workers={args.workers}")
 
     # A4 — Pre-flight balance check. Stop early unless --force.
+    # Estimate must include BOTH 2GIS places and Instagram batch lookups,
+    # otherwise we systematically underestimate by ~50% (real-world: 80-lead
+    # Almaty run had pre-flight estimate $0.90 but actual spend $1.38).
     if hasattr(src, "get_balance_usd") and hasattr(src, "cost_per_1k_places"):
         bal = src.get_balance_usd()
-        est_cost = over_fetch / 1000.0 * src.cost_per_1k_places
+        est_places = over_fetch / 1000.0 * src.cost_per_1k_places
+        est_ig = over_fetch * 0.86 / 1000.0 * 2.30  # ~86% candidates have IG (measured)
+        est_cost = est_places + est_ig
         if bal is not None and bal < est_cost * 0.8 and not args.force:
             _emit({
                 "status": "balance_warning",
                 "estimated_cost_usd": round(est_cost, 2),
+                "estimated_cost_breakdown_usd": {
+                    "twogis_places": round(est_places, 2),
+                    "instagram_batch": round(est_ig, 2),
+                },
                 "balance_remaining_usd": round(bal, 2),
                 "advice": (
                     f"Apify free credit (${bal:.2f}) may run out before reaching {target} leads. "

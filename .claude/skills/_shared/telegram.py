@@ -21,6 +21,38 @@ def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def send_telegram_text(env_vars: dict, text: str, parse_mode: str = "HTML") -> None:
+    """Send a free-form text message to all configured Telegram chats.
+
+    Simpler than `send_telegram_report` (which formats a structured run report
+    from a dict). Use this for progress pings, ad-hoc messages, alerts.
+
+    Silently no-ops if Telegram isn't configured. Never raises — failure is
+    printed and swallowed so the caller pipeline can continue.
+    """
+    token = env_vars.get("TELEGRAM_BOT_TOKEN")
+    chat_ids_str = env_vars.get("TELEGRAM_REPORT_CHAT_ID", "")
+    if not token or not chat_ids_str:
+        return  # Not configured — silent skip is fine for progress notes.
+
+    chat_ids = [cid.strip() for cid in chat_ids_str.split(",") if cid.strip()]
+    for chat_id in chat_ids:
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            data = json.dumps({
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT)
+        except Exception as e:
+            print(f"  WARNING: Telegram text to {chat_id} failed: {e}")
+
+
 def send_telegram_report(env_vars: dict, report: dict, title: str = "DemoSender"):
     """Send a formatted report to Telegram.
 
