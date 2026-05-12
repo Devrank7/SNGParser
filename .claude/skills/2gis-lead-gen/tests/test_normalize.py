@@ -117,3 +117,37 @@ def test_normalize_keeps_original_in_raw():
     raw = {"id": "1", "extra": "preserve-me"}
     b = ApifyDataSource._normalize(raw)
     assert b["raw"] is raw  # same object reference, useful for debugging
+
+
+# ─── Size signals (added 2026-05-12) ────────────────────────────────────────
+
+def test_normalize_extracts_review_count():
+    raw = {"id": "1", "reviewsCount": 192, "ratingCount": 279}
+    b = ApifyDataSource._normalize(raw)
+    assert b["review_count"] == 192
+    assert b["rating_count"] == 279
+
+
+def test_normalize_defaults_to_zero_when_no_review_count():
+    raw = {"id": "1"}
+    b = ApifyDataSource._normalize(raw)
+    assert b["review_count"] == 0
+    assert b["rating_count"] == 0
+
+
+def test_normalize_extracts_branch_count_from_brand():
+    raw = {"id": "1", "brand": {"name": "Incanto", "branchCount": 4}}
+    b = ApifyDataSource._normalize(raw)
+    assert b["branch_count"] == 4
+
+
+def test_normalize_defaults_branch_count_to_1_when_no_brand():
+    raw = {"id": "1"}
+    b = ApifyDataSource._normalize(raw)
+    assert b["branch_count"] == 1
+
+
+def test_normalize_handles_null_brand_gracefully():
+    raw = {"id": "1", "brand": None}
+    b = ApifyDataSource._normalize(raw)
+    assert b["branch_count"] == 1

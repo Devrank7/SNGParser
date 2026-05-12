@@ -37,11 +37,21 @@ CREATE TABLE IF NOT EXISTS leads (
     data_source        TEXT,
     twogis_url         TEXT,
     address            TEXT,
+    size_estimate      TEXT,        -- 'micro' | 'sweet_spot' | 'large' | 'large_chain' | 'unknown'
+    review_count       INTEGER DEFAULT 0,
+    rating_count       INTEGER DEFAULT 0,
+    branch_count       INTEGER DEFAULT 1,
     discovered_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     sheet_row          INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_city_niche ON leads(city, niche);
 CREATE INDEX IF NOT EXISTS idx_discovered_at ON leads(discovered_at);
+"""
+
+# Indexes that reference columns added by _maybe_migrate. Created after the
+# migration step so they don't fail on pre-migration databases.
+POST_MIGRATION_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_size_estimate ON leads(size_estimate);
 """
 
 
@@ -55,11 +65,25 @@ def connect(db_path: Path = DB_PATH_DEFAULT) -> sqlite3.Connection:
 
 
 def _maybe_migrate(conn):
-    """Add owner_ig_source column to existing leads.db that pre-dates it."""
+    """Add new columns to existing leads.db that pre-dates them."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(leads)").fetchall()}
-    if "owner_ig_source" not in cols:
-        conn.execute("ALTER TABLE leads ADD COLUMN owner_ig_source TEXT DEFAULT ''")
+    new_cols = {
+        "owner_ig_source": "TEXT DEFAULT ''",
+        "size_estimate":   "TEXT DEFAULT 'unknown'",
+        "review_count":    "INTEGER DEFAULT 0",
+        "rating_count":    "INTEGER DEFAULT 0",
+        "branch_count":    "INTEGER DEFAULT 1",
+    }
+    dirty = False
+    for col, ddl in new_cols.items():
+        if col not in cols:
+            conn.execute(f"ALTER TABLE leads ADD COLUMN {col} {ddl}")
+            dirty = True
+    if dirty:
         conn.commit()
+    # Create indexes that reference migration-added columns now that they exist.
+    conn.executescript(POST_MIGRATION_INDEXES)
+    conn.commit()
 
 
 def is_known(conn: sqlite3.Connection, twogis_id: str) -> bool:
@@ -88,8 +112,10 @@ def insert_lead(conn: sqlite3.Connection, lead: dict, sheet_row: Optional[int] =
             phone, phone_type, owner_name, owner_phone,
             owner_instagram, owner_ig_source, company_instagram,
             website, has_website, contact_method,
-            data_source, twogis_url, address, sheet_row
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            data_source, twogis_url, address,
+            size_estimate, review_count, rating_count, branch_count,
+            sheet_row
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             lead.get("twogis_id", ""),
@@ -109,6 +135,10 @@ def insert_lead(conn: sqlite3.Connection, lead: dict, sheet_row: Optional[int] =
             lead.get("data_source", ""),
             lead.get("twogis_url", ""),
             lead.get("address", ""),
+            lead.get("size_estimate", "unknown"),
+            int(lead.get("review_count", 0) or 0),
+            int(lead.get("rating_count", 0) or 0),
+            int(lead.get("branch_count", 1) or 1),
             sheet_row,
         ),
     )

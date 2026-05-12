@@ -108,6 +108,10 @@ CREATE TABLE leads (
   owner_phone        TEXT,
   owner_instagram    TEXT,
   owner_ig_source    TEXT,        -- '' (manual / not set) | 'serper-auto'
+  size_estimate      TEXT,        -- 'micro' | 'sweet_spot' | 'large' | 'large_chain' | 'unknown'
+  review_count       INTEGER,
+  rating_count       INTEGER,
+  branch_count       INTEGER,
   company_instagram  TEXT,
   website            TEXT,
   has_website        INTEGER,     -- always 0 here (we drop those before insert)
@@ -144,6 +148,75 @@ Headers are written automatically on first append if sheet is empty:
 | 12 | Company Instagram | `@handle` from 2GIS — the manager's entry point for tier=company_ig leads, and a sanity-check anchor for tier=owner_ig leads |
 | 13 | 2GIS URL | canonical 2gis.kz/kg link |
 | 14 | Data Source | `apify` or `direct_2gis` |
+| 15 | Size Estimate | `micro` / `sweet_spot` / `large` / `large_chain` / `unknown` (see Company-size filter section) |
+
+## Company-size filter (4-10 employees by default)
+
+Added 2026-05-12 after a real-world 80-lead Almaty hair-beauty run showed
+30% of leads were micro or large-chain — not our target. Now the pipeline
+classifies each candidate by proxy signals from 2GIS BEFORE expensive
+enrichment (Serper / IG bio fetches) and skips out-of-bucket candidates.
+
+### Proxy signals from 2GIS
+
+| Signal | Provided by m_mamaev actor | Used for |
+|---|---|---|
+| `reviewsCount` | Number of customer reviews on 2GIS | Proxy for traffic, weight on size |
+| `ratingCount` | Number of ratings (≥ reviewsCount usually) | Secondary signal |
+| `brand.branchCount` | Number of branches under same brand | Chain detection |
+
+### Size classification (`niches.estimate_size`)
+
+```
+branch_count > max_branches    → "large_chain"
+reviewsCount > max_reviews     → "large"
+ratingCount > max_rating_count → "large"
+reviewsCount < min_reviews
+   AND ratingCount < 2x min   → "micro"
+otherwise (within all bounds)  → "sweet_spot"
+fallback                       → "unknown"
+```
+
+### Default thresholds (in `niches.DEFAULT_SIZE_THRESHOLDS`)
+
+```python
+{
+    "min_reviews": 10,        # below = micro (1-3 person operation)
+    "max_reviews": 300,       # above = large established business
+    "max_rating_count": 600,
+    "max_branches": 3,        # 4+ = chain
+}
+```
+
+Calibrated against the 80-lead Almaty hair-beauty run on 2026-05-12 —
+70% landed in sweet_spot with these limits.
+
+### Per-niche overrides
+
+`niches.NICHE_SIZE_OVERRIDES` is a hook for niche-specific tuning if
+default thresholds turn out wrong for, say, travel agencies (which
+typically have fewer reviews). Currently empty.
+
+### CLI overrides
+
+- `--min-reviews N` / `--max-reviews N` / `--max-branches N` — override thresholds
+- `--include-micro` — accept micro businesses
+- `--include-large` — accept large + large_chain
+- `--include-unknown` — accept unclassified
+
+Default `allowed_sizes = {"sweet_spot"}`.
+
+### Filter runs FIRST in the pipeline
+
+Inside `_enrich_one`, size check happens BEFORE website-check and BEFORE
+the IG batch fetch results are consumed. This means:
+
+- Skipped-by-size candidates don't consume the Serper budget
+- IG profile-fetch batch (which runs before enrichment) still hits all
+  candidates regardless of size — could optimise later by skipping
+  pre-fetch for businesses that will fail size
+
+Future improvement: filter by size BEFORE the IG pre-fetch to save more.
 
 ## Pricing notes (Apify free tier)
 

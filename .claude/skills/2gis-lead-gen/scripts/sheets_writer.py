@@ -31,6 +31,7 @@ DEFAULT_HEADERS = [
     "Company Instagram",
     "2GIS URL",
     "Data Source",
+    "Size Estimate",   # micro / sweet_spot / large / large_chain / unknown
 ]
 
 
@@ -124,6 +125,7 @@ def append_leads(sheet_id: str, leads: list) -> dict:
         f"@{lead['company_instagram']}" if lead.get("company_instagram") else "",
         lead.get("twogis_url", ""),
         lead.get("data_source", ""),
+        lead.get("size_estimate", "unknown"),
     ] for lead in leads]
 
     res = svc.spreadsheets().values().append(

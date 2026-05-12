@@ -31,7 +31,10 @@ sys.path.insert(0, str(SKILLS_DIR))
 
 from _shared.config import load_env  # type: ignore
 
-from niches import NICHES, CITIES, resolve_niche, resolve_city
+from niches import (
+    NICHES, CITIES, resolve_niche, resolve_city,
+    thresholds_for_niche, estimate_size,
+)
 from data_sources import get_data_source, ApifyDataSource, Direct2GisDataSource
 from website_check import check_business as check_website
 from phone_classify import classify, pick_best_mobile
@@ -251,29 +254,31 @@ def cmd_telegram_report(args):
 # ─────────────────────────────────────────────────────────────────────
 
 def _enrich_one(biz, city_slug, city_ru, niche_slug, niche_ru, source_name,
-                src, serper_key, ig_cache):
+                src, serper_key, ig_cache, size_thresholds, allowed_sizes):
     """Decide what to do with a single candidate. Pure function — returns
-    {"lead": dict | None, "outcome": "phone"|"owner_ig"|"company_ig"|"website"|"no_contact"}.
+    {"lead": dict | None, "outcome": str, "size_estimate": str}.
 
-    3-tier cascade (revised 2026-05-12):
-      tier "phone"      — mobile in 2GIS card → outreach via call/WhatsApp
-      tier "owner_ig"   — Serper found both an owner name AND a likely personal
-                          IG handle. Handle is written with owner_ig_source =
-                          "serper-auto" so the manager knows to verify before
-                          contacting (Serper can hit homonyms / employees).
-      tier "company_ig" — no usable mobile and Serper didn't surface a personal
-                          IG; we hand off just the company IG and (if any)
-                          the owner name as a hint
-      anything else     — drop
+    Outcomes:
+      "phone"        — mobile in 2GIS card → outreach via call/WhatsApp
+      "owner_ig"     — Serper found owner name + likely personal IG handle
+      "company_ig"   — no mobile, no personal IG, but company IG available
+      "website"      — has website → not our target
+      "no_contact"   — neither phone nor IG → can't act on
+      "size_filtered" — outside the company-size sweet spot (4-10 employees)
 
-    We DO NOT scrape Instagram bios for the owner's phone. The IG profile
-    pre-fetch (in run.py) is used ONLY for website detection.
+    Size filter runs FIRST so we don't waste expensive enrichment (Serper,
+    IG bio fetches) on businesses that don't fit our target anyway.
     """
+    # 0. Size filter (4-10 employees by default). Runs FIRST to save spend.
+    size = estimate_size(biz, thresholds=size_thresholds)
+    if size not in allowed_sizes:
+        return {"lead": None, "outcome": "size_filtered", "size_estimate": size}
+
     # 1. Website check using pre-fetched IG profile when possible.
     ig_profile = ig_cache.get((biz.get("instagram") or "").lower()) if biz.get("instagram") else None
     web = check_website(biz, ig_profile=ig_profile)
     if web["has_website"]:
-        return {"lead": None, "outcome": "website"}
+        return {"lead": None, "outcome": "website", "size_estimate": size}
 
     # 2. Tier "phone" — mobile from 2GIS card.
     phone_pick = pick_best_mobile(biz.get("phones", []))
@@ -282,8 +287,10 @@ def _enrich_one(biz, city_slug, city_ru, niche_slug, niche_ru, source_name,
             "lead": _build_lead(biz, city_slug, city_ru, niche_slug, niche_ru, source_name,
                                 phone=phone_pick["normalized"],
                                 phone_type=phone_pick["type"],
-                                contact_method="phone"),
+                                contact_method="phone",
+                                size_estimate=size),
             "outcome": "phone",
+            "size_estimate": size,
         }
 
     # 3. Owner discovery via Serper — only run if there's at least a company IG
@@ -299,20 +306,24 @@ def _enrich_one(biz, city_slug, city_ru, niche_slug, niche_ru, source_name,
                                     owner_instagram=owner["owner_instagram"],
                                     owner_ig_source=owner.get("owner_ig_source", "serper-auto"),
                                     company_instagram=biz["instagram"],
-                                    contact_method="owner_ig"),
+                                    contact_method="owner_ig",
+                                    size_estimate=size),
                 "outcome": "owner_ig",
+                "size_estimate": size,
             }
         # 3b. Tier "company_ig" — Serper may have given us just a name.
         return {
             "lead": _build_lead(biz, city_slug, city_ru, niche_slug, niche_ru, source_name,
                                 owner_name=owner.get("owner_name", ""),
                                 company_instagram=biz["instagram"],
-                                contact_method="company_ig"),
+                                contact_method="company_ig",
+                                size_estimate=size),
             "outcome": "company_ig",
+            "size_estimate": size,
         }
 
     # 4. No phone, no IG → manager can't act → drop.
-    return {"lead": None, "outcome": "no_contact"}
+    return {"lead": None, "outcome": "no_contact", "size_estimate": size}
 
 
 def cmd_search(args):
@@ -393,9 +404,32 @@ def cmd_search(args):
     )
 
     # Step 3: parallel enrichment.
+    # Build size thresholds (niche default + per-niche overrides + CLI overrides).
+    size_thresholds = thresholds_for_niche(niche_slug)
+    if args.min_reviews is not None:
+        size_thresholds["min_reviews"] = args.min_reviews
+    if args.max_reviews is not None:
+        size_thresholds["max_reviews"] = args.max_reviews
+    if args.max_branches is not None:
+        size_thresholds["max_branches"] = args.max_branches
+
+    # Which size buckets are eligible. Default = sweet_spot only.
+    allowed_sizes = {"sweet_spot"}
+    if args.include_micro:
+        allowed_sizes.add("micro")
+    if args.include_large:
+        allowed_sizes.update({"large", "large_chain"})
+    if args.include_unknown:
+        allowed_sizes.add("unknown")
+
+    _log(f"size filter: allowed={sorted(allowed_sizes)} thresholds={size_thresholds}")
+
     collected = []
     counters = {"phone": 0, "owner_ig": 0, "company_ig": 0,
-                "skipped_website": 0, "skipped_no_contact": 0, "processed": 0}
+                "skipped_website": 0, "skipped_no_contact": 0,
+                "skipped_size": 0, "processed": 0}
+    size_breakdown = {"micro": 0, "sweet_spot": 0, "large": 0,
+                      "large_chain": 0, "unknown": 0}
     state_lock = threading.Lock()
     db_lock = threading.Lock()
     stop_event = threading.Event()
@@ -406,10 +440,11 @@ def cmd_search(args):
             return None
         try:
             return _enrich_one(biz, city_slug, city_ru, niche_slug, niche_ru,
-                               src.name, src, serper_key, ig_cache)
+                               src.name, src, serper_key, ig_cache,
+                               size_thresholds, allowed_sizes)
         except Exception as e:
             _log(f"worker failed for {biz.get('name','?')}: {e}")
-            return {"lead": None, "outcome": "no_contact"}
+            return {"lead": None, "outcome": "no_contact", "size_estimate": "unknown"}
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(_worker, biz): biz for biz in candidates}
@@ -419,12 +454,16 @@ def cmd_search(args):
                 continue
             outcome = res["outcome"]
             lead = res["lead"]
+            size_est = res.get("size_estimate", "unknown")
             with state_lock:
                 counters["processed"] += 1
+                size_breakdown[size_est] = size_breakdown.get(size_est, 0) + 1
                 if outcome == "website":
                     counters["skipped_website"] += 1
                 elif outcome == "no_contact":
                     counters["skipped_no_contact"] += 1
+                elif outcome == "size_filtered":
+                    counters["skipped_size"] += 1
                 elif lead is not None and len(collected) < target:
                     counters[outcome] += 1
                     collected.append(lead)
@@ -439,7 +478,9 @@ def cmd_search(args):
                     last_progress_at[0] = proc
                     _log(f"progress: processed={proc} collected={len(collected)}/{target} "
                          f"breakdown phone={counters['phone']} owner_ig={counters['owner_ig']} "
-                         f"company_ig={counters['company_ig']} skipped_web={counters['skipped_website']} "
+                         f"company_ig={counters['company_ig']} "
+                         f"skipped_web={counters['skipped_website']} "
+                         f"skipped_size={counters['skipped_size']} "
                          f"skipped_nc={counters['skipped_no_contact']}")
                 if len(collected) > 0 and len(collected) % 50 == 0 and lead is not None:
                     _telegram_progress(
@@ -497,6 +538,10 @@ def cmd_search(args):
         "candidates_processed": counters["processed"],
         "candidates_with_website_skipped": counters["skipped_website"],
         "candidates_no_contact_skipped": counters["skipped_no_contact"],
+        "candidates_size_filtered": counters["skipped_size"],
+        "size_breakdown": size_breakdown,
+        "size_thresholds_used": size_thresholds,
+        "allowed_sizes": sorted(allowed_sizes),
         "apify_spend_usd": apify_spend,
         "elapsed_seconds": elapsed,
         "sheet_rows_appended": sheet_info["appended"],
@@ -534,6 +579,10 @@ def _build_lead(biz, city_slug, city_ru, niche_slug, niche_ru, source_name, **ex
         "contact_method": extra["contact_method"],
         "data_source": source_name,
         "discovered_at": _now_iso(),
+        "size_estimate": extra.get("size_estimate", "unknown"),
+        "review_count": biz.get("review_count", 0),
+        "rating_count": biz.get("rating_count", 0),
+        "branch_count": biz.get("branch_count", 1),
     }
 
 
@@ -580,6 +629,22 @@ def main():
                     help="Skip pre-flight balance warning (proceed even if free credit may be exhausted).")
     se.add_argument("--no-telegram", action="store_true",
                     help="Disable Telegram progress notifications.")
+    # Size-filter knobs (default: 4-10 employees = sweet_spot only).
+    se.add_argument("--min-reviews", type=int, default=None,
+                    help="Min 2GIS reviewsCount to be considered (default by niche: 10). "
+                         "Lower = include smaller / newer businesses.")
+    se.add_argument("--max-reviews", type=int, default=None,
+                    help="Max 2GIS reviewsCount before being classified as 'large' "
+                         "(default by niche: 300). Higher = include more established businesses.")
+    se.add_argument("--max-branches", type=int, default=None,
+                    help="Max branch count before classification as 'large_chain' "
+                         "(default 3). Higher = include networks.")
+    se.add_argument("--include-micro", action="store_true",
+                    help="Include businesses classified as 'micro' (1-3 people). Off by default.")
+    se.add_argument("--include-large", action="store_true",
+                    help="Include businesses classified as 'large' or 'large_chain'. Off by default.")
+    se.add_argument("--include-unknown", action="store_true",
+                    help="Include businesses whose size could not be classified. Off by default.")
     se.add_argument("--dry-run", action="store_true")
     se.add_argument("--summary-out", default=None)
     se.set_defaults(func=cmd_search)

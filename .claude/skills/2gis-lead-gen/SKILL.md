@@ -112,6 +112,34 @@ Optional flags:
 - `--force` — proceed even when pre-flight balance check warns that free credit may run out
 - `--no-telegram` — disable Telegram progress pings (start + every 50 leads + final)
 
+Company-size filter (default targets 4-10-employee businesses):
+- `--min-reviews N` — override min 2GIS reviewsCount (default 10)
+- `--max-reviews N` — override max (default 300)
+- `--max-branches N` — override max branch count (default 3, above = chain)
+- `--include-micro` — also accept businesses classified as `micro` (1-3 people)
+- `--include-large` — also accept `large` and `large_chain` (10+ employees or 4+ branches)
+- `--include-unknown` — also accept businesses whose size couldn't be classified
+
+By default the pipeline keeps ONLY `sweet_spot` (4-10 people) leads — the segment
+that has budget for a $300-400 site but isn't big enough to have an in-house team.
+Micro businesses often can't afford the offer, large ones won't bother with it.
+
+### Size-aware reporting
+
+The `search` JSON summary now includes:
+```json
+{
+  "candidates_size_filtered": 47,
+  "size_breakdown": {"micro": 12, "sweet_spot": 80, "large": 35, "large_chain": 4, "unknown": 8},
+  "size_thresholds_used": {"min_reviews": 10, "max_reviews": 300, ...},
+  "allowed_sizes": ["sweet_spot"]
+}
+```
+Report this to the user — it shows how aggressive the filter was. If
+`size_filtered` is the dominant skip reason and the user wants more leads,
+suggest `--include-large` or relax `--max-reviews` rather than dropping size
+filter entirely.
+
 ### Pre-flight balance check (exit code 4)
 
 The script auto-checks Apify balance against estimated spend. If `balance < cost * 0.8`,

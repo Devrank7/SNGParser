@@ -112,6 +112,50 @@ def test_insert_lead_with_sheet_row(tmp_db):
     assert row["sheet_row"] == 42
 
 
+def test_insert_lead_persists_size_signals(tmp_db):
+    lead = _make_lead("biz1", size_estimate="sweet_spot",
+                     review_count=75, rating_count=140, branch_count=2)
+    dedup_db.insert_lead(tmp_db, lead)
+    row = tmp_db.execute("SELECT * FROM leads WHERE twogis_id='biz1'").fetchone()
+    assert row["size_estimate"] == "sweet_spot"
+    assert row["review_count"] == 75
+    assert row["rating_count"] == 140
+    assert row["branch_count"] == 2
+
+
+def test_migration_adds_size_columns_to_pre_v6_db(tmp_path):
+    """A pre-existing DB without size columns should auto-migrate on connect."""
+    db_path = tmp_path / "old.db"
+    raw = sqlite3.connect(str(db_path))
+    raw.executescript("""
+        CREATE TABLE leads (
+            twogis_id TEXT PRIMARY KEY,
+            name TEXT, city TEXT, niche TEXT,
+            phone TEXT, phone_type TEXT,
+            owner_name TEXT, owner_phone TEXT,
+            owner_instagram TEXT, owner_ig_source TEXT,
+            company_instagram TEXT,
+            website TEXT, has_website INTEGER, contact_method TEXT,
+            data_source TEXT, twogis_url TEXT, address TEXT,
+            discovered_at DATETIME, sheet_row INTEGER
+        );
+        INSERT INTO leads (twogis_id, name) VALUES ('legacy_1', 'Old Lead');
+    """)
+    raw.commit()
+    raw.close()
+
+    conn = dedup_db.connect(db_path)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(leads)").fetchall()}
+    for required in {"size_estimate", "review_count", "rating_count", "branch_count"}:
+        assert required in cols, f"Migration didn't add {required}"
+
+    row = conn.execute("SELECT * FROM leads WHERE twogis_id='legacy_1'").fetchone()
+    assert row["name"] == "Old Lead"
+    # New columns should have sensible defaults for legacy rows.
+    assert row["review_count"] == 0
+    assert row["branch_count"] == 1
+
+
 # ─── is_known / filter_unknown ───────────────────────────────────────────────
 
 def test_is_known_after_insert(tmp_db):

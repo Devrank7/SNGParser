@@ -33,6 +33,10 @@ BUSINESS_FIELDS = [
     "other_socials",     # dict {"vk": "...", "telegram": "...", "whatsapp": "..."}
     "category",
     "twogis_url",        # canonical 2gis.kz/kg link if available
+    # Size signals — used by run.py to filter micro / large businesses out.
+    "review_count",      # 2GIS review count (proxy for traffic / employees)
+    "rating_count",      # 2GIS rating count (similar proxy)
+    "branch_count",      # number of branches for this brand (1 = single shop)
     "raw",               # original record from upstream, for debugging
 ]
 
@@ -49,6 +53,9 @@ def _empty_business():
         "other_socials": {},
         "category": "",
         "twogis_url": "",
+        "review_count": 0,
+        "rating_count": 0,
+        "branch_count": 1,
         "raw": None,
     }
 
@@ -267,6 +274,14 @@ class ApifyDataSource:
         rubrics = item.get("rubrics") or []
         b["category"] = rubrics[0] if rubrics else (item.get("category") or "")
         b["twogis_url"] = item.get("url") or ""
+
+        # Size signals: reviews + ratings + branch count
+        b["review_count"] = int(item.get("reviewsCount") or 0)
+        b["rating_count"] = int(item.get("ratingCount") or 0)
+        brand = item.get("brand") or {}
+        if isinstance(brand, dict):
+            b["branch_count"] = int(brand.get("branchCount") or 1)
+
         b["raw"] = item
         return b
 
