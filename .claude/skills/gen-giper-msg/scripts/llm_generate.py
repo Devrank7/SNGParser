@@ -315,18 +315,30 @@ def validate_message(parts: dict, lead: dict) -> Optional[str]:
 
     # 5. Personalization proof: business name OR its first significant word
     #    OR the company IG handle must appear somewhere in the message.
+    #
+    # Special case: if the business has a fully generic name (only generic
+    # niche words: "Студия ногтей", "Beauty Salon"), Sonnet legitimately can't
+    # quote it as a brand and the strict check 3x retries forever. For those
+    # we relax — require either an IG handle OR an address/district anchor.
     biz = (lead.get("business_name") or "").strip()
     if biz:
-        proofs = []
-        proofs.append(biz.lower())
+        GENERIC_NAME_WORDS = {
+            "студия", "салон", "красоты", "красота", "ногтей", "ногтевая",
+            "beauty", "salon", "studio", "nail", "nails", "barbershop",
+            "парикмахерская", "парикмахерская,", "маникюр", "косметология",
+            "фитнес", "тренажёрный", "тренажерный", "тренажёрного", "зал",
+            "турагентство", "турфирма", "тур", "агентство",
+        }
         short = biz.split(",")[0].strip().lower()
-        proofs.append(short)
-        # First "brand-y" word from the name — usually the brand part
-        # ("Parizat nail studio" → "parizat", "Stilist studio" → "stilist").
-        first_word = short.split()[0] if short.split() else ""
-        if first_word and len(first_word) >= 3:
+        words = [w.strip(".,()").lower() for w in short.split() if w.strip(".,()")]
+        is_generic = bool(words) and all(
+            w in GENERIC_NAME_WORDS or len(w) <= 2 for w in words
+        )
+
+        proofs = [biz.lower(), short]
+        first_word = words[0] if words else ""
+        if first_word and len(first_word) >= 3 and first_word not in GENERIC_NAME_WORDS:
             proofs.append(first_word)
-        # Company IG handle counts as personalization proof.
         company_ig = (lead.get("company_instagram") or "").lstrip("@").lower()
         if company_ig:
             proofs.append(company_ig)
@@ -334,9 +346,27 @@ def validate_message(parts: dict, lead: dict) -> Optional[str]:
         if owner_ig:
             proofs.append(owner_ig)
 
-        if not any(p and p in low for p in proofs):
-            return (f"Не упомянуто название бизнеса ({biz!r}), его бренд-часть или IG-handle. "
-                    f"Гиперперсонализация требует хотя бы одного из них в hook или observation.")
+        if is_generic:
+            # Generic name — accept IG handle OR address anchor as proof.
+            address = (lead.get("address") or "").lower()
+            if address:
+                # Pick a distinctive address fragment (street/district name).
+                # Skip stopwords like "улица", "дом", numbers.
+                addr_words = re.findall(r"[а-яёa-z]{4,}", address)
+                addr_words = [w for w in addr_words
+                              if w not in {"улица", "проспект", "район", "микрорайон",
+                                           "переулок", "бульвар", "дом"}]
+                proofs.extend(addr_words[:3])
+            # Also accept any explicit IG handle in message text.
+            if not any(p and p in low for p in proofs):
+                return (f"Generic business name ({biz!r}) requires either a Company IG handle "
+                        f"or a specific street/district from the address to appear in the message. "
+                        f"Не упомянут ни IG, ни кусочек адреса. Помести один из этих якорей "
+                        f"в hook или observation.")
+        else:
+            if not any(p and p in low for p in proofs):
+                return (f"Не упомянуто название бизнеса ({biz!r}), его бренд-часть или IG-handle. "
+                        f"Гиперперсонализация требует хотя бы одного из них в hook или observation.")
 
     # 6. Owner name presence rules.
     owner = (lead.get("owner_name") or "").strip()

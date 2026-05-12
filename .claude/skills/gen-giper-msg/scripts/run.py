@@ -20,7 +20,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from sheets_io import (  # type: ignore
     parse_sheet_id, validate_and_prepare,
-    read_leads_without_message, write_message,
+    read_leads_without_message, write_message, load_sheet_context,
 )
 from personalize import build_user_prompt, channel_for  # type: ignore
 from llm_generate import generate_for_lead  # type: ignore
@@ -83,6 +83,12 @@ def cmd_generate(args):
 
     _log(f"processing {len(leads)} leads, model={args.model}, workers={args.workers}, tier={args.tier}")
 
+    # Load sheet metadata ONCE upfront — every `write_message` call would
+    # otherwise re-read the header row, which exhausts Google's 60 read/min/user
+    # quota on the first 60 leads of a parallel run. With this cache each write
+    # is a single batchUpdate call (~80 API calls total instead of ~160).
+    sheet_context = load_sheet_context(sid)
+
     breakdown = {"WhatsApp": 0, "Instagram DM": 0}
     failed = []
     sheet_lock = threading.Lock()
@@ -106,7 +112,8 @@ def cmd_generate(args):
                 with sheet_lock:
                     try:
                         write_message(sid, lead["row_number"], result["message"],
-                                      channel=channel, status="draft")
+                                      channel=channel, status="draft",
+                                      context=sheet_context)
                     except Exception as e:
                         _log(f"sheet write failed row {lead['row_number']}: {e}")
                         failed.append({
@@ -127,7 +134,8 @@ def cmd_generate(args):
                 with sheet_lock:
                     try:
                         write_message(sid, lead["row_number"], "", channel=result["channel"],
-                                      status="validation_failed")
+                                      status="validation_failed",
+                                      context=sheet_context)
                     except Exception:
                         pass
 

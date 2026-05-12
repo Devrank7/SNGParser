@@ -226,12 +226,16 @@ def read_leads_without_message(sheet_id: str, limit: int = None,
     return out
 
 
-def write_message(sheet_id: str, row_number: int, message: str,
-                  channel: str, status: str = "draft") -> None:
-    """Update Initial Message / Channel / Message Status for a specific row."""
+def load_sheet_context(sheet_id: str) -> dict:
+    """Read sheet metadata ONCE upfront so per-row writes don't have to.
+
+    Returns a dict with `service`, `tab`, and `target_indexes` that callers
+    of `write_message` can pass in to avoid re-reading headers on every write.
+    Without this, an 80-lead run with workers=5 burns 80 read-requests in ~3
+    min and hits Google's 60 read/min/user quota mid-run.
+    """
     svc = get_sheets_service()
     tab = get_sheet_title(svc, sheet_id)
-    # Re-read headers to find the target column letters.
     h_res = svc.spreadsheets().values().get(
         spreadsheetId=sheet_id, range=f"'{tab}'!A1:ZZ1"
     ).execute()
@@ -239,6 +243,26 @@ def write_message(sheet_id: str, row_number: int, message: str,
     tgt_idx = _target_column_index(headers)
     if "Initial Message" not in tgt_idx:
         raise RuntimeError("Sheet does not have 'Initial Message' column. Run validate first.")
+    return {"service": svc, "tab": tab, "target_indexes": tgt_idx}
+
+
+def write_message(sheet_id: str, row_number: int, message: str,
+                  channel: str, status: str = "draft",
+                  context: dict = None) -> None:
+    """Update Initial Message / Channel / Message Status for a specific row.
+
+    If `context` is provided (from load_sheet_context), uses cached
+    service+tab+indexes and only makes ONE API call (batchUpdate writes).
+    Without context, falls back to legacy behavior (reads headers + writes,
+    two API calls per row).
+    """
+    if context is None:
+        # Legacy path — kept for callers that don't pre-load context.
+        context = load_sheet_context(sheet_id)
+
+    svc = context["service"]
+    tab = context["tab"]
+    tgt_idx = context["target_indexes"]
 
     updates = []
     for col_name, value in (
