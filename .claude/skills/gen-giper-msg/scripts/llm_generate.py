@@ -328,17 +328,34 @@ def validate_message(parts: dict, lead: dict) -> Optional[str]:
             "парикмахерская", "парикмахерская,", "маникюр", "косметология",
             "фитнес", "тренажёрный", "тренажерный", "тренажёрного", "зал",
             "турагентство", "турфирма", "тур", "агентство",
+            "туристическое", "туристская", "туристский",  # added 2026-05-13
+            "экскурсии", "экскурсионное", "экскурсионная",
+            "ип", "тоо", "ооо", "осоо", "ао",  # legal forms (not brand parts)
         }
-        short = biz.split(",")[0].strip().lower()
+        # Try every comma-separated segment as a potential brand source.
+        # "Туристическое агентство, ИП Unity Express" → also try "ИП Unity Express"
+        # → strip leading legal form "ИП" → "Unity Express" is the brand.
+        LEGAL_FORM_PREFIXES = ("ип ", "тоо ", "ооо ", "осоо ", "ао ", "пбоюл ", "кп ")
+        all_segments = [seg.strip().lower() for seg in biz.split(",") if seg.strip()]
+        brand_parts = []
+        for seg in all_segments:
+            for prefix in LEGAL_FORM_PREFIXES:
+                if seg.startswith(prefix):
+                    seg = seg[len(prefix):].strip()
+                    break
+            for w in seg.split():
+                w_clean = w.strip(".,()").lower()
+                if w_clean and len(w_clean) >= 3 and w_clean not in GENERIC_NAME_WORDS:
+                    brand_parts.append(w_clean)
+
+        short = all_segments[0] if all_segments else biz.lower()
         words = [w.strip(".,()").lower() for w in short.split() if w.strip(".,()")]
         is_generic = bool(words) and all(
             w in GENERIC_NAME_WORDS or len(w) <= 2 for w in words
-        )
+        ) and not brand_parts  # if we found a brand part anywhere in the name, NOT generic
 
         proofs = [biz.lower(), short]
-        first_word = words[0] if words else ""
-        if first_word and len(first_word) >= 3 and first_word not in GENERIC_NAME_WORDS:
-            proofs.append(first_word)
+        proofs.extend(brand_parts)
         company_ig = (lead.get("company_instagram") or "").lstrip("@").lower()
         if company_ig:
             proofs.append(company_ig)
@@ -369,12 +386,24 @@ def validate_message(parts: dict, lead: dict) -> Optional[str]:
                         f"Гиперперсонализация требует хотя бы одного из них в hook или observation.")
 
     # 6. Owner name presence rules.
+    #
+    # Owner names in Serper results come in mixed format:
+    #   "Аскарбек Нурманбетов"            (Имя Фамилия)
+    #   "Нурманбетов Аскарбек Турсунбекович" (Фамилия Имя Отчество — KZ formal)
+    # Without context we can't tell which token is the given name. Russian
+    # convention is to address by given name, not surname. So we accept if
+    # ANY non-trivial name token appears in the message (>=3 chars, not a
+    # legal-form word like ИП/ТОО).
     owner = (lead.get("owner_name") or "").strip()
+    NAME_STOPWORDS = {"ип", "ооо", "тоо", "оо", "осоо", "пбоюл", "кп", "ао"}
     if owner:
-        # If we have a name, it MUST appear in the message somewhere (usually hook).
-        first_name = owner.split()[0].lower()
-        if first_name not in low:
-            return f"Имя владельца '{owner}' не использовано. Если имя дано — оно должно быть в hook."
+        candidates = [w.strip(".,()").lower() for w in owner.split() if w.strip(".,()")]
+        candidates = [w for w in candidates
+                      if len(w) >= 3 and w not in NAME_STOPWORDS]
+        if candidates and not any(c in low for c in candidates):
+            return (f"Имя владельца '{owner}' не использовано (ни одно из его частей: "
+                    f"{candidates}). Если имя дано — обратись по нему в hook "
+                    f"(обычно по имени, а не по фамилии).")
     else:
         # If we don't have a name, the message must NOT invent one. Hard to detect cleanly,
         # but flag if "Здравствуйте, [SomeName]" pattern appears.
