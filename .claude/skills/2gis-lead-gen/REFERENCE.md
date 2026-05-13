@@ -149,6 +149,9 @@ Headers are written automatically on first append if sheet is empty:
 | 13 | 2GIS URL | canonical 2gis.kz/kg link |
 | 14 | Data Source | `apify` or `direct_2gis` |
 | 15 | Size Estimate | `micro` / `sweet_spot` / `large` / `large_chain` / `unknown` (see Company-size filter section) |
+| 16 | Owner Confidence | `high` / `medium` / `unknown` / `low` — populated by `enrich-confidence` command, see Owner-confidence section |
+| 17 | Owner Conf Score | Signed integer — sum of weighted signals (for debugging) |
+| 18 | Owner Conf Reasons | Short text explanation of which signals applied |
 
 ## Company-size filter (4-10 employees by default)
 
@@ -217,6 +220,55 @@ the IG batch fetch results are consumed. This means:
   pre-fetch for businesses that will fail size
 
 Future improvement: filter by size BEFORE the IG pre-fetch to save more.
+
+## Owner-confidence scoring (Tier 1)
+
+Module `scripts/owner_confidence.py`. CLI entry: `run.py enrich-confidence`.
+
+Computes a per-lead score for **likelihood that the phone is the owner's
+personal number** (vs admin / receptionist / agent). Composite signal —
+no single source answers this for KZ/KG, so we add multiple weak signals.
+
+### Signals currently implemented (Tier 1, free or near-free)
+
+| Signal | Source | Score weights |
+|---|---|---|
+| `cross_card_freq` | SQLite (`phones_with_frequency`) | unique phone +2, on 2 cards 0, on 3+ −3 |
+| `serper_role` | One Serper.dev query per phone, scans top-10 snippets for keywords | owner-keyword (директор/основатель/founder) +2; admin-keyword (ресепшн/администратор) −3; agent-context (OLX/Avito/agent) −1 |
+
+### Bucketing
+
+```
+score >= 3   →  "high"     (probably personal owner)
+score 1..2   →  "medium"   (some positive signal)
+score -1..0  →  "unknown"  (no strong signal either way)
+score <= -2  →  "low"      (likely admin / agent / employee)
+```
+
+### Real distribution example (78 travel leads, Almaty + Bishkek, 2026-05-13)
+
+```
+high:    1   (1%)   — Serper found 'директор' near number
+medium:  68  (93%)  — phone unique to 1 card, no role signal
+unknown: 4   (5%)   — Serper found admin keyword like 'информация'
+low:     0
+```
+
+73 phone-tier leads scored. 5 leads without phone (company_ig / owner_ig tiers)
+skipped — they have no phone to verify.
+
+### Deferred tiers (NOT yet implemented)
+
+| Tier | Signal | Cost / 100 | Status |
+|---|---|---|---|
+| 2a | Egov.kz director match (KZ only) | $0 (requires dev cabinet registration) | Deferred |
+| 2b | Maytapi WhatsApp isBusiness | $0.25/100 | Deferred |
+| 3 | Kompra.kz paid director DB | $3-8/100 | Out of scope |
+| 4 | GetContact unofficial (rooted Android, ToS-gray) | $0 infra + ban risk | Won't do |
+
+Future iterations should add Tier 2a first — Egov.kz is free and provides
+the strongest signal we know of (Egov director name → fuzzy match against
+2GIS company → IG bio name → match score).
 
 ## Pricing notes (Apify free tier)
 

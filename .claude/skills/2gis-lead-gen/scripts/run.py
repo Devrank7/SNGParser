@@ -256,6 +256,164 @@ def cmd_resume(args):
     })
 
 
+def cmd_enrich_confidence(args):
+    """Post-process an existing Sheet: compute owner-confidence per row.
+
+    Reads each row's phone + business name + city, computes Tier-1
+    confidence (cross-card frequency + Serper role-hint search), writes
+    three columns back: Owner Confidence / Owner Conf Score / Owner Conf
+    Reasons. Adds the columns to the header row if missing.
+
+    Idempotent: re-running re-computes and overwrites (Serper results may
+    change as new content is indexed).
+    """
+    from owner_confidence import compute_owner_confidence
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    env = load_env()
+    serper_key = env.get("SERPER_API_KEY", "").strip()
+    sid = args.sheet  # accept ID or URL
+    # Reuse sheets_writer's parser if user passed a URL
+    from sheets_writer import parse_sheet_id
+    sid = parse_sheet_id(sid)
+
+    sys.path.insert(0, str(SKILLS_DIR))
+    from _shared.sheets import get_sheets_service, get_sheet_title  # type: ignore
+
+    svc = get_sheets_service()
+    tab = get_sheet_title(svc, sid)
+
+    # Pull current headers + rows
+    res = svc.spreadsheets().values().get(
+        spreadsheetId=sid, range=f"'{tab}'!A1:ZZ"
+    ).execute()
+    rows = res.get("values", [])
+    if not rows:
+        _emit({"status": "error", "reason": "sheet is empty"})
+        return
+    headers = rows[0]
+
+    # Add 3 confidence headers if missing
+    needed = ["Owner Confidence", "Owner Conf Score", "Owner Conf Reasons"]
+    new_headers = list(headers)
+    added = []
+    for h in needed:
+        if h not in new_headers:
+            new_headers.append(h)
+            added.append(h)
+    if added:
+        def _letter(i):
+            out = ""; n = i + 1
+            while n: n, r = divmod(n - 1, 26); out = chr(65 + r) + out
+            return out
+        last_col = _letter(len(new_headers) - 1)
+        svc.spreadsheets().values().update(
+            spreadsheetId=sid,
+            range=f"'{tab}'!A1:{last_col}1",
+            valueInputOption="RAW",
+            body={"values": [new_headers]},
+        ).execute()
+        _log(f"added columns: {added}")
+        headers = new_headers
+
+    def col_idx(name): return headers.index(name) if name in headers else None
+    i_phone = col_idx("Phone")
+    i_name = col_idx("Business Name")
+    i_city = col_idx("City")
+    i_conf = col_idx("Owner Confidence")
+    i_score = col_idx("Owner Conf Score")
+    i_reasons = col_idx("Owner Conf Reasons")
+
+    if any(x is None for x in (i_phone, i_name, i_city, i_conf, i_score, i_reasons)):
+        _emit({"status": "error", "reason": "required columns missing after header update"})
+        return
+
+    # Iterate rows, compute confidence per row, batch-write back
+    from dedup_db import connect as db_connect, phones_with_frequency
+
+    candidates = []  # (row_num, lead_dict)
+    for ri, row in enumerate(rows[1:], start=2):
+        if not any(c for c in row):
+            continue
+        phone = row[i_phone] if i_phone < len(row) else ""
+        name = row[i_name] if i_name < len(row) else ""
+        city_ru = row[i_city] if i_city < len(row) else ""
+        if not phone:  # Only phone-tier leads get scored (others have no phone to verify)
+            continue
+        candidates.append((ri, {"phone": phone, "business_name": name, "city_ru": city_ru}))
+
+    # Pre-load phone→occurrence-count map ONCE in main thread.
+    # sqlite3 connections aren't thread-safe; workers must operate on
+    # this dict instead of opening their own DB cursors.
+    conn = db_connect()
+    phone_freq_map = phones_with_frequency(conn, min_count=1)
+    conn.close()
+    _log(f"loaded freq map for {len(phone_freq_map)} distinct phones in DB")
+
+    _log(f"computing owner-confidence for {len(candidates)} phone-tier leads "
+         f"(workers={args.workers}, serper={'on' if not args.no_serper else 'off'})")
+
+    updates_lock = threading.Lock()
+    updates = []
+    from collections import Counter
+    bucket_count = Counter()
+
+    def _letter(i):
+        out = ""; n = i + 1
+        while n: n, r = divmod(n - 1, 26); out = chr(65 + r) + out
+        return out
+    col_letter_conf = _letter(i_conf)
+    col_letter_score = _letter(i_score)
+    col_letter_reasons = _letter(i_reasons)
+
+    def _worker(ri, lead):
+        result = compute_owner_confidence(
+            lead, phone_freq_map, serper_key=serper_key,
+            do_serper=not args.no_serper,
+        )
+        with updates_lock:
+            bucket_count[result["bucket"]] += 1
+            reasons = "; ".join(f"{n}: {w}" for n, _, w in result["signals"])
+            updates.append({
+                "range": f"'{tab}'!{col_letter_conf}{ri}",
+                "values": [[result["bucket"]]],
+            })
+            updates.append({
+                "range": f"'{tab}'!{col_letter_score}{ri}",
+                "values": [[result["score"]]],
+            })
+            updates.append({
+                "range": f"'{tab}'!{col_letter_reasons}{ri}",
+                "values": [[reasons[:500]]],  # cap to avoid huge cells
+            })
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futs = [pool.submit(_worker, ri, lead) for ri, lead in candidates]
+        done = 0
+        for f in as_completed(futs):
+            f.result()
+            done += 1
+            if done % 20 == 0:
+                _log(f"progress: {done}/{len(candidates)} scored")
+
+    # Batch-write everything in chunks of 100 (sheets API limit)
+    CHUNK = 100
+    for i in range(0, len(updates), CHUNK):
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=sid,
+            body={"valueInputOption": "RAW", "data": updates[i:i+CHUNK]},
+        ).execute()
+    _log(f"wrote {len(updates)//3} rows of confidence data")
+
+    _emit({
+        "status": "success",
+        "scored_leads": len(candidates),
+        "bucket_distribution": dict(bucket_count),
+        "sheet_url": f"https://docs.google.com/spreadsheets/d/{sid}/",
+    })
+
+
 def cmd_telegram_report(args):
     from _shared.telegram import send_telegram_text  # type: ignore
     with open(args.result) as f:
@@ -710,6 +868,18 @@ def main():
     st = sub.add_parser("telegram-report")
     st.add_argument("--result", required=True, help="Path to summary JSON")
     st.set_defaults(func=cmd_telegram_report)
+
+    ec = sub.add_parser("enrich-confidence",
+        help="Post-process existing Sheet: compute owner-confidence per row "
+             "(cross-card frequency + Serper role hints).")
+    ec.add_argument("--sheet", required=True,
+                    help="Sheet URL or ID to enrich. Adds 3 new columns and "
+                         "writes a high/medium/unknown/low bucket per phone-tier row.")
+    ec.add_argument("--workers", type=int, default=5,
+                    help="Parallel workers (default 5). Each row does 1 Serper call.")
+    ec.add_argument("--no-serper", action="store_true",
+                    help="Skip Serper enrichment, score only on cross-card frequency.")
+    ec.set_defaults(func=cmd_enrich_confidence)
 
     args = p.parse_args()
     args.func(args)

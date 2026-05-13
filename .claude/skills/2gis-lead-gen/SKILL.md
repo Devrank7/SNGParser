@@ -203,6 +203,29 @@ python3.11 /Users/devlink007/Downloads/SNGParser/.claude/skills/2gis-lead-gen/sc
 ### Status check (no spending)
 "какой статус скилла?" / "что в базе?" → `python3 .../run.py status` — prints counts of leads in DB by city × niche.
 
+### Owner-confidence enrichment (Tier 1)
+"проверь кто на трубке" / "пометь владельцев" / "проставь уверенность по лидам":
+
+```bash
+python3.11 .../run.py enrich-confidence --sheet <id-or-url> [--workers 5] [--no-serper]
+```
+
+Post-processes a Sheet that already has phone-tier leads. Adds three columns
+(`Owner Confidence` / `Owner Conf Score` / `Owner Conf Reasons`) per row using:
+
+1. **Cross-card frequency** (free, from SQLite): phone on 1 card = +2, on 3+
+   cards = −3 (likely agent/broker handling multiple businesses).
+2. **Serper role hints** (~$0.001/row via Serper, free tier 2500/mo): one
+   Google search per phone, scans top-10 snippets for keywords like
+   «директор/основатель» (+2) or «ресепшн/администратор» (−3).
+
+Output bucket per row: `high` (score ≥ 3), `medium` (1-2), `unknown` (−1 to 0),
+`low` (≤ −2). The manager filters Sheet by `Owner Confidence = high` to
+prioritise outreach, and demotes `low` rows (likely admins/agents).
+
+Idempotent — re-running re-computes and overwrites. Skip Serper with
+`--no-serper` for an offline cross-card-only pass.
+
 ### Cleanup (explicit user request only)
 If the user explicitly says "очисти базу" / "сбрось лидов в [городе] [нише]" / "сделай чистый запуск":
 ```bash

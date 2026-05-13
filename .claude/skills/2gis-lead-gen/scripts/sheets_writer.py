@@ -32,6 +32,9 @@ DEFAULT_HEADERS = [
     "2GIS URL",
     "Data Source",
     "Size Estimate",   # micro / sweet_spot / large / large_chain / unknown
+    "Owner Confidence", # high / medium / unknown / low — likelihood that phone is owner-personal
+    "Owner Conf Score", # signed int — sum of signals (for debugging)
+    "Owner Conf Reasons", # short text explanation
 ]
 
 

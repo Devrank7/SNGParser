@@ -169,3 +169,42 @@ def clean(conn: sqlite3.Connection, city: str, niche: str) -> int:
     cur = conn.execute("DELETE FROM leads WHERE city = ? AND niche = ?", (city, niche))
     conn.commit()
     return cur.rowcount
+
+
+def count_phone_occurrences(conn: sqlite3.Connection, phone: str) -> int:
+    """How many distinct businesses in the DB share this phone number?
+
+    Used by the owner-confidence scorer: a phone on a single 2GIS card is
+    strong evidence of a single-owner business. A phone on 3+ cards is
+    strong evidence of an agent / broker / multi-business operator who is
+    NOT the owner of any specific business we'd reach out to.
+
+    Counts by `twogis_id` (PRIMARY KEY) so we only count distinct businesses,
+    not duplicate rows.
+    """
+    if not phone:
+        return 0
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT twogis_id) AS n FROM leads WHERE phone = ?",
+        (phone,),
+    ).fetchone()
+    return row["n"] if row else 0
+
+
+def phones_with_frequency(conn: sqlite3.Connection, min_count: int = 2) -> dict:
+    """Return {phone: count} for phones appearing on >= min_count businesses.
+
+    Useful for bulk-flagging multi-business operators in one query instead
+    of N individual lookups.
+    """
+    rows = conn.execute(
+        """
+        SELECT phone, COUNT(DISTINCT twogis_id) AS n
+        FROM leads
+        WHERE phone != ''
+        GROUP BY phone
+        HAVING n >= ?
+        """,
+        (min_count,),
+    ).fetchall()
+    return {r["phone"]: r["n"] for r in rows}
